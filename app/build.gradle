@@ -31,7 +31,7 @@ android {
     buildToolsVersion "30.0.3"
 
     defaultConfig {
-        applicationId "com.lagradost.cloudstream3"
+        applicationId "com.lagradost.cloudstream3-fork"
         minSdkVersion 21
         targetSdkVersion 30
 
