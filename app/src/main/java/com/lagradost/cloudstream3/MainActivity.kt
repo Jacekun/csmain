@@ -487,7 +487,9 @@ class MainActivity : AppCompatActivity(), ColorPickerDialogListener {
                     // it.hashCode() is not enough to make sure they are distinct
                     apis =
                         allProviders.distinctBy { it.lang + it.name + it.mainUrl + it.javaClass.name }
+                    apis = apis + ExampleProvider()
                     APIHolder.apiMap = null
+                    Log.i("DevDebug", "Providers loaded onAllPluginsLoaded")
                 } catch (e: Exception) {
                     logError(e)
                 }
@@ -607,6 +609,8 @@ class MainActivity : AppCompatActivity(), ColorPickerDialogListener {
             initAll()
             // No duplicates (which can happen by registerMainAPI)
             apis = allProviders.distinctBy { it }
+            apis = apis + ExampleProvider()
+            Log.i("DevDebug", "Providers loaded")
         }
 
         //  val navView: BottomNavigationView = findViewById(R.id.nav_view)
