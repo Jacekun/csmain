@@ -15,23 +15,28 @@ import android.view.ViewGroup
 import android.widget.AbsListView
 import android.widget.ArrayAdapter
 import android.widget.ImageView
+import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.core.view.isGone
 import androidx.core.view.isVisible
 import androidx.core.widget.doOnTextChanged
 import androidx.lifecycle.ViewModelProvider
 import androidx.preference.PreferenceManager
+import androidx.recyclerview.widget.RecyclerView
 import com.discord.panels.OverlappingPanelsLayout
-import com.google.android.material.button.MaterialButton
+import com.google.android.material.chip.Chip
+import com.google.android.material.chip.ChipDrawable
 import com.lagradost.cloudstream3.APIHolder.getApiDubstatusSettings
 import com.lagradost.cloudstream3.APIHolder.getApiFromNameNull
 import com.lagradost.cloudstream3.APIHolder.updateHasTrailers
+import com.lagradost.cloudstream3.CommonActivity.showToast
 import com.lagradost.cloudstream3.DubStatus
 import com.lagradost.cloudstream3.MainActivity.Companion.afterPluginsLoadedEvent
 import com.lagradost.cloudstream3.R
 import com.lagradost.cloudstream3.SearchResponse
 import com.lagradost.cloudstream3.TvType
 import com.lagradost.cloudstream3.mvvm.*
+import com.lagradost.cloudstream3.services.SubscriptionWorkManager
 import com.lagradost.cloudstream3.syncproviders.providers.Kitsu
 import com.lagradost.cloudstream3.ui.WatchType
 import com.lagradost.cloudstream3.ui.download.DOWNLOAD_ACTION_DOWNLOAD
@@ -48,6 +53,7 @@ import com.lagradost.cloudstream3.utils.AppUtils.loadCache
 import com.lagradost.cloudstream3.utils.AppUtils.openBrowser
 import com.lagradost.cloudstream3.utils.Coroutines.ioWorkSafe
 import com.lagradost.cloudstream3.utils.Coroutines.main
+import com.lagradost.cloudstream3.utils.DataStoreHelper.getVideoWatchState
 import com.lagradost.cloudstream3.utils.DataStoreHelper.getViewPos
 import com.lagradost.cloudstream3.utils.SingleSelectionHelper.showBottomDialog
 import com.lagradost.cloudstream3.utils.UIHelper.colorFromAttribute
@@ -82,6 +88,8 @@ import kotlinx.android.synthetic.main.fragment_result.result_next_airing
 import kotlinx.android.synthetic.main.fragment_result.result_next_airing_time
 import kotlinx.android.synthetic.main.fragment_result.result_no_episodes
 import kotlinx.android.synthetic.main.fragment_result.result_play_movie
+import kotlinx.android.synthetic.main.fragment_result.result_poster
+import kotlinx.android.synthetic.main.fragment_result.result_poster_holder
 import kotlinx.android.synthetic.main.fragment_result.result_reload_connection_open_in_browser
 import kotlinx.android.synthetic.main.fragment_result.result_reload_connectionerror
 import kotlinx.android.synthetic.main.fragment_result.result_resume_parent
@@ -96,12 +104,21 @@ import kotlinx.android.synthetic.main.fragment_result.result_vpn
 import kotlinx.android.synthetic.main.fragment_result_swipe.*
 import kotlinx.android.synthetic.main.fragment_result_tv.*
 import kotlinx.android.synthetic.main.result_sync.*
+import kotlinx.android.synthetic.main.trailer_custom_layout.*
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 
-
 const val START_ACTION_RESUME_LATEST = 1
 const val START_ACTION_LOAD_EP = 2
+
+/**
+ * Future proofed way to mark episodes as watched
+ **/
+enum class VideoWatchState {
+    /** Default value when no key is set */
+    None,
+    Watched
+}
 
 data class ResultEpisode(
     val headerName: String,
@@ -121,6 +138,10 @@ data class ResultEpisode(
     val isFiller: Boolean?,
     val tvType: TvType,
     val parentId: Int,
+    /**
+     * Conveys if the episode itself is marked as watched
+     **/
+    val videoWatchState: VideoWatchState
 )
 
 fun ResultEpisode.getRealPosition(): Long {
@@ -157,6 +178,7 @@ fun buildResultEpisode(
     parentId: Int,
 ): ResultEpisode {
     val posDur = getViewPos(id)
+    val videoWatchState = getVideoWatchState(id) ?: VideoWatchState.None
     return ResultEpisode(
         headerName,
         name,
@@ -175,6 +197,7 @@ fun buildResultEpisode(
         isFiller,
         tvType,
         parentId,
+        videoWatchState
     )
 }
 
@@ -258,7 +281,7 @@ open class ResultFragment : ResultTrailerPlayer() {
     private var downloadButton: EasyDownloadButton? = null
     override fun onDestroyView() {
         updateUIListener = null
-        (result_episodes?.adapter as EpisodeAdapter?)?.killAdapter()
+        (result_episodes?.adapter as? EpisodeAdapter)?.killAdapter()
         downloadButton?.dispose()
 
         super.onDestroyView()
@@ -439,7 +462,7 @@ open class ResultFragment : ResultTrailerPlayer() {
                     temporary_no_focus?.requestFocus()
                 }
 
-                (result_episodes?.adapter as? EpisodeAdapter?)?.updateList(episodes.value)
+                (result_episodes?.adapter as? EpisodeAdapter)?.updateList(episodes.value)
 
                 if (isTv && hasEpisodes) main {
                     delay(500)
@@ -490,11 +513,10 @@ open class ResultFragment : ResultTrailerPlayer() {
         return StoredData(url, apiName, showFillers, dubStatus, start, playerAction)
     }
 
-    private fun reloadViewModel(success: Boolean = false) {
-        if (!viewModel.hasLoaded()) {
+    private fun reloadViewModel(forceReload: Boolean) {
+        if (!viewModel.hasLoaded() || forceReload) {
             val storedData = getStoredData(activity ?: context ?: return) ?: return
 
-            //viewModel.clear()
             viewModel.load(
                 activity,
                 storedData.url ?: return,
@@ -510,6 +532,25 @@ open class ResultFragment : ResultTrailerPlayer() {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
 
+        result_cast_items?.layoutManager = object : LinearListLayout(view.context) {
+            override fun onRequestChildFocus(
+                parent: RecyclerView,
+                state: RecyclerView.State,
+                child: View,
+                focused: View?
+            ): Boolean {
+                // Make the cast always focus the first visible item when focused
+                // from somewhere else. Otherwise it jumps to the last item.
+                return if (parent.focusedChild == null) {
+                    scrollToPosition(this.findFirstCompletelyVisibleItemPosition())
+                    true
+                } else {
+                    super.onRequestChildFocus(parent, state, child, focused)
+                }
+            }
+        }.apply {
+            this.orientation = RecyclerView.HORIZONTAL
+        }
         result_cast_items?.adapter = ActorAdaptor()
 
         updateUIListener = ::updateUI
@@ -556,6 +597,19 @@ open class ResultFragment : ResultTrailerPlayer() {
                 }
             )
 
+
+        observe(viewModel.episodeSynopsis) { description ->
+            view.context?.let { ctx ->
+                val builder: AlertDialog.Builder =
+                    AlertDialog.Builder(ctx, R.style.AlertDialogCustom)
+                builder.setMessage(description.html())
+                    .setTitle(R.string.synopsis)
+                    .setOnDismissListener {
+                        viewModel.releaseEpisodeSynopsis()
+                    }
+                    .show()
+            }
+        }
 
         observe(viewModel.watchStatus) { watchType ->
             result_bookmark_button?.text = getString(watchType.stringRes)
@@ -656,7 +710,7 @@ open class ResultFragment : ResultTrailerPlayer() {
             val newList = list.filter { it.isSynced && it.hasAccount }
 
             result_mini_sync?.isVisible = newList.isNotEmpty()
-            (result_mini_sync?.adapter as? ImageAdapter?)?.updateList(newList.mapNotNull { it.icon })
+            (result_mini_sync?.adapter as? ImageAdapter)?.updateList(newList.mapNotNull { it.icon })
         }
 
         var currentSyncProgress = 0
@@ -819,6 +873,7 @@ open class ResultFragment : ResultTrailerPlayer() {
         }
 
         observe(viewModel.page) { data ->
+            if (data == null) return@observe
             when (data) {
                 is Resource.Success -> {
                     val d = data.value
@@ -838,6 +893,8 @@ open class ResultFragment : ResultTrailerPlayer() {
                     result_next_airing.setText(d.nextAiringEpisode)
                     result_next_airing_time.setText(d.nextAiringDate)
                     result_poster.setImage(d.posterImage)
+                    result_poster_background.setImage(d.posterBackgroundImage)
+                    //result_trailer_thumbnail.setImage(d.posterBackgroundImage, fadeIn = false)
 
                     if (d.posterImage != null && !isTrueTvSettings())
                         result_poster_holder?.setOnClickListener {
@@ -866,8 +923,38 @@ open class ResultFragment : ResultTrailerPlayer() {
 
 
                     result_cast_items?.isVisible = d.actors != null
-                    (result_cast_items?.adapter as ActorAdaptor?)?.apply {
+                    (result_cast_items?.adapter as? ActorAdaptor)?.apply {
                         updateList(d.actors ?: emptyList())
+                    }
+
+                    observeNullable(viewModel.subscribeStatus) { isSubscribed ->
+                        result_subscribe?.isVisible = isSubscribed != null
+                        if (isSubscribed == null) return@observeNullable
+
+                        val drawable = if (isSubscribed) {
+                            R.drawable.ic_baseline_notifications_active_24
+                        } else {
+                            R.drawable.baseline_notifications_none_24
+                        }
+
+                        result_subscribe?.setImageResource(drawable)
+                    }
+
+                    result_subscribe?.setOnClickListener {
+                        val isSubscribed =
+                            viewModel.toggleSubscriptionStatus() ?: return@setOnClickListener
+
+                        val message = if (isSubscribed) {
+                            // Kinda icky to have this here, but it works.
+                            SubscriptionWorkManager.enqueuePeriodicWork(context)
+                            R.string.subscription_new
+                        } else {
+                            R.string.subscription_deleted
+                        }
+
+                        val name = (viewModel.page.value as? Resource.Success)?.value?.title
+                            ?: txt(R.string.no_data).asStringNull(context) ?: ""
+                        showToast(activity, txt(message, name), Toast.LENGTH_SHORT)
                     }
 
                     result_open_in_browser?.isVisible = d.url.startsWith("http")
@@ -917,8 +1004,6 @@ open class ResultFragment : ResultTrailerPlayer() {
                         }
 
 
-                    result_tag?.removeAllViews()
-
                     d.comingSoon.let { soon ->
                         result_coming_soon?.isVisible = soon
                         result_data_holder?.isGone = soon
@@ -926,18 +1011,40 @@ open class ResultFragment : ResultTrailerPlayer() {
 
                     val tags = d.tags
                     result_tag_holder?.isVisible = tags.isNotEmpty()
-                    if (tags.isNotEmpty()) {
-                        //result_tag_holder?.visibility = VISIBLE
-                        val isOnTv = isTrueTvSettings()
-                        for ((index, tag) in tags.withIndex()) {
+                    result_tag?.apply {
+                        removeAllViews()
+                        tags.forEach { tag ->
+                            val chip = Chip(context)
+                            val chipDrawable = ChipDrawable.createFromAttributes(
+                                context,
+                                null,
+                                0,
+                                R.style.ChipFilled
+                            )
+                            chip.setChipDrawable(chipDrawable)
+                            chip.text = tag
+                            chip.isChecked = false
+                            chip.isCheckable = false
+                            chip.isFocusable = false
+                            chip.isClickable = false
+                            chip.setTextColor(context.colorFromAttribute(R.attr.textColor))
+                            addView(chip)
+                        }
+                    }
+                    // if (tags.isNotEmpty()) {
+                    //result_tag_holder?.visibility = VISIBLE
+                    //val isOnTv = isTrueTvSettings()
+
+
+                    /*for ((index, tag) in tags.withIndex()) {
                             val viewBtt = layoutInflater.inflate(R.layout.result_tag, null)
                             val btt = viewBtt.findViewById<MaterialButton>(R.id.result_tag_card)
                             btt.text = tag
                             btt.isFocusable = !isOnTv
                             btt.isClickable = !isOnTv
                             result_tag?.addView(viewBtt, index)
-                        }
-                    }
+                        }*/
+                    //}
                 }
                 is Resource.Failure -> {
                     result_error_text.text = storedData?.url?.plus("\n") + data.errorString

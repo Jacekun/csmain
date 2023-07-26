@@ -8,9 +8,12 @@ import androidx.appcompat.widget.SearchView
 import androidx.core.view.isVisible
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.activityViewModels
+import com.lagradost.cloudstream3.APIHolder.getApiProviderLangSettings
+import com.lagradost.cloudstream3.AllLanguagesName
 import com.lagradost.cloudstream3.R
+import com.lagradost.cloudstream3.TvType
 import com.lagradost.cloudstream3.mvvm.observe
-import com.lagradost.cloudstream3.ui.home.HomeFragment.Companion.getPairList
+import com.lagradost.cloudstream3.ui.home.HomeFragment.Companion.bindChips
 import com.lagradost.cloudstream3.ui.settings.SettingsFragment.Companion.isTvSettings
 import com.lagradost.cloudstream3.ui.settings.SettingsFragment.Companion.setUpToolbar
 import com.lagradost.cloudstream3.ui.settings.appLanguages
@@ -18,6 +21,8 @@ import com.lagradost.cloudstream3.utils.SingleSelectionHelper.showMultiDialog
 import com.lagradost.cloudstream3.utils.SubtitleHelper
 import com.lagradost.cloudstream3.utils.UIHelper.toPx
 import kotlinx.android.synthetic.main.fragment_plugins.*
+import kotlinx.android.synthetic.main.tvtypes_chips.*
+import kotlinx.android.synthetic.main.tvtypes_chips_scroll.*
 
 const val PLUGINS_BUNDLE_NAME = "name"
 const val PLUGINS_BUNDLE_URL = "url"
@@ -41,6 +46,15 @@ class PluginsFragment : Fragment() {
         pluginViewModel.tvTypes.clear()
         pluginViewModel.languages = listOf()
         pluginViewModel.search(null)
+
+        // Filter by language set on preferred media
+        activity?.let {
+            val providerLangs = it.getApiProviderLangSettings().toList()
+            if (!providerLangs.contains(AllLanguagesName)) {
+                pluginViewModel.languages = mutableListOf("none") + providerLangs
+                //Log.i("DevDebug", "providerLang => ${pluginViewModel.languages.toJson()}")
+            }
+        }
 
         val name = arguments?.getString(PLUGINS_BUNDLE_NAME)
         val url = arguments?.getString(PLUGINS_BUNDLE_URL)
@@ -129,7 +143,7 @@ class PluginsFragment : Fragment() {
         }
 
         observe(pluginViewModel.filteredPlugins) { (scrollToTop, list) ->
-            (plugin_recycler_view?.adapter as? PluginAdapter?)?.updateList(list)
+            (plugin_recycler_view?.adapter as? PluginAdapter)?.updateList(list)
 
             if (scrollToTop)
                 plugin_recycler_view?.scrollToPosition(0)
@@ -145,56 +159,10 @@ class PluginsFragment : Fragment() {
             pluginViewModel.updatePluginList(context, url)
             tv_types_scroll_view?.isVisible = true
 
-            // 💀💀💀💀💀💀💀 Recyclerview when
-            val pairList = getPairList(
-                home_select_anime,
-                home_select_cartoons,
-                home_select_tv_series,
-                home_select_documentaries,
-                home_select_movies,
-                home_select_asian,
-                home_select_livestreams,
-                home_select_nsfw,
-                home_select_others
-            )
-
-//            val supportedTypes: Array<String> =
-//                pluginViewModel.filteredPlugins.value!!.second.flatMap { it -> it.plugin.second.tvTypes ?: listOf("Other") }.distinct().toTypedArray()
-
-            // Copy pasted code
-            for ((button, validTypes) in pairList) {
-                val validTypesMapped = validTypes.map { it.name }
-                val isValid = true
-                //validTypes.any { it -> supportedTypes.contains(it.name) }
-                button?.isVisible = isValid
-                if (isValid) {
-                    fun buttonContains(): Boolean {
-                        return pluginViewModel.tvTypes.any { validTypesMapped.contains(it) }
-                    }
-
-                    button?.isSelected = buttonContains()
-                    button?.setOnClickListener {
-                        pluginViewModel.tvTypes.clear()
-                        pluginViewModel.tvTypes.addAll(validTypesMapped)
-                        for ((otherButton, _) in pairList) {
-                            otherButton?.isSelected = false
-                        }
-                        button.isSelected = true
-                        pluginViewModel.updateFilteredPlugins()
-                    }
-
-                    button?.setOnLongClickListener {
-                        if (!buttonContains()) {
-                            button.isSelected = true
-                            pluginViewModel.tvTypes.addAll(validTypesMapped)
-                        } else {
-                            button.isSelected = false
-                            pluginViewModel.tvTypes.removeAll(validTypesMapped)
-                        }
-                        pluginViewModel.updateFilteredPlugins()
-                        return@setOnLongClickListener true
-                    }
-                }
+            bindChips(home_select_group, emptyList(), TvType.values().toList()) { list ->
+                pluginViewModel.tvTypes.clear()
+                pluginViewModel.tvTypes.addAll(list.map { it.name })
+                pluginViewModel.updateFilteredPlugins()
             }
         }
     }

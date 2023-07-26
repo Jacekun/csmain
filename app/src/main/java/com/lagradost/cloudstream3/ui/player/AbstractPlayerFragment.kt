@@ -38,6 +38,7 @@ import com.lagradost.cloudstream3.ui.subtitles.SaveCaptionStyle
 import com.lagradost.cloudstream3.ui.subtitles.SubtitlesFragment
 import com.lagradost.cloudstream3.utils.AppUtils
 import com.lagradost.cloudstream3.utils.AppUtils.requestLocalAudioFocus
+import com.lagradost.cloudstream3.utils.EpisodeSkip
 import com.lagradost.cloudstream3.utils.UIHelper
 import com.lagradost.cloudstream3.utils.UIHelper.hideSystemUI
 import com.lagradost.cloudstream3.utils.UIHelper.popCurrentPage
@@ -101,6 +102,14 @@ abstract class AbstractPlayerFragment(
 
     open fun onTracksInfoChanged() {
         throw NotImplementedError()
+    }
+
+    open fun onTimestamp(timestamp: EpisodeSkip.SkipStamp?) {
+
+    }
+
+    open fun onTimestampSkipped(timestamp: EpisodeSkip.SkipStamp) {
+
     }
 
     open fun exitedPipMode() {
@@ -175,7 +184,7 @@ abstract class AbstractPlayerFragment(
             isInPIPMode = isInPictureInPictureMode
             if (isInPictureInPictureMode) {
                 // Hide the full-screen UI (controls, etc.) while in picture-in-picture mode.
-                player_holder?.alpha = 0f
+                piphide?.isVisible = false
                 pipReceiver = object : BroadcastReceiver() {
                     override fun onReceive(
                         context: Context,
@@ -203,7 +212,7 @@ abstract class AbstractPlayerFragment(
                 updateIsPlaying(Pair(isPlayingValue, isPlayingValue))
             } else {
                 // Restore the full-screen UI.
-                player_holder?.alpha = 1f
+                piphide?.isVisible = true
                 exitedPipMode()
                 pipReceiver?.let {
                     activity?.unregisterReceiver(it)
@@ -373,7 +382,9 @@ abstract class AbstractPlayerFragment(
             ),
             subtitlesUpdates = ::subtitlesChanged,
             embeddedSubtitlesFetched = ::embeddedSubtitlesFetched,
-            onTracksInfoChanged = ::onTracksInfoChanged
+            onTracksInfoChanged = ::onTracksInfoChanged,
+            onTimestampInvoked = ::onTimestamp,
+            onTimestampSkipped = ::onTimestampSkipped
         )
 
         if (player is CS3IPlayer) {

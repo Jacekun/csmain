@@ -9,7 +9,9 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.content.res.Resources
+import android.graphics.Bitmap
 import android.graphics.Color
+import android.graphics.drawable.Drawable
 import android.os.Build
 import android.os.Bundle
 import android.view.*
@@ -28,20 +30,27 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.graphics.alpha
 import androidx.core.graphics.blue
+import androidx.core.graphics.drawable.toBitmapOrNull
 import androidx.core.graphics.green
 import androidx.core.graphics.red
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentActivity
 import androidx.navigation.fragment.NavHostFragment
+import androidx.palette.graphics.Palette
 import androidx.preference.PreferenceManager
+import com.bumptech.glide.load.DataSource
 import com.bumptech.glide.load.engine.DiskCacheStrategy
+import com.bumptech.glide.load.engine.GlideException
 import com.bumptech.glide.load.model.GlideUrl
 import com.bumptech.glide.load.resource.drawable.DrawableTransitionOptions
+import com.bumptech.glide.request.RequestListener
+import com.bumptech.glide.request.RequestOptions.bitmapTransform
+import com.bumptech.glide.request.target.Target
 import com.lagradost.cloudstream3.R
 import com.lagradost.cloudstream3.mvvm.logError
+import com.lagradost.cloudstream3.ui.result.UiImage
 import com.lagradost.cloudstream3.ui.settings.SettingsFragment.Companion.isEmulatorSettings
 import com.lagradost.cloudstream3.ui.settings.SettingsFragment.Companion.isTvSettings
-import com.lagradost.cloudstream3.utils.GlideOptions.bitmapTransform
 import jp.wasabeef.glide.transformations.BlurTransformation
 import kotlin.math.roundToInt
 
@@ -57,7 +66,10 @@ object UIHelper {
             this,
             Manifest.permission.WRITE_EXTERNAL_STORAGE
         )
-                == PackageManager.PERMISSION_GRANTED)
+                == PackageManager.PERMISSION_GRANTED
+                // Since Android 13, we can't request external storage permission,
+                // so don't check it.
+                || Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
     }
 
     fun Activity.requestRW() {
@@ -102,7 +114,7 @@ object UIHelper {
         listView.requestLayout()
     }
 
-    fun Activity?.getSpanCount(): Int? {
+    fun Context?.getSpanCount(): Int? {
         val compactView = false
         val spanCountLandscape = if (compactView) 2 else 6
         val spanCountPortrait = if (compactView) 1 else 3
@@ -136,7 +148,7 @@ object UIHelper {
                     navigation, arguments
                 )
             }
-        } catch (t : Throwable) {
+        } catch (t: Throwable) {
             logError(t)
         }
     }
@@ -155,21 +167,91 @@ object UIHelper {
         return color
     }
 
+    var createPaletteAsyncCache: HashMap<String, Palette> = hashMapOf()
+    fun createPaletteAsync(url: String, bitmap: Bitmap, callback: (Palette) -> Unit) {
+        createPaletteAsyncCache[url]?.let { palette ->
+            callback.invoke(palette)
+            return
+        }
+        Palette.from(bitmap).generate { paletteNull ->
+            paletteNull?.let { palette ->
+                createPaletteAsyncCache[url] = palette
+                callback(palette)
+            }
+        }
+    }
+
     fun ImageView?.setImage(
         url: String?,
         headers: Map<String, String>? = null,
         @DrawableRes
-        errorImageDrawable: Int? = null
+        errorImageDrawable: Int? = null,
+        fadeIn: Boolean = true,
+        colorCallback: ((Palette) -> Unit)? = null
     ): Boolean {
-        if (this == null || url.isNullOrBlank()) return false
+        if (url.isNullOrBlank()) return false
+        this.setImage(UiImage.Image(url, headers, errorImageDrawable), errorImageDrawable, fadeIn, colorCallback)
+        return true
+    }
+
+    fun ImageView?.setImage(
+        uiImage: UiImage?,
+        @DrawableRes
+        errorImageDrawable: Int? = null,
+        fadeIn: Boolean = true,
+        colorCallback: ((Palette) -> Unit)? = null
+    ): Boolean {
+        if (this == null || uiImage == null) return false
+
+        val (glideImage, identifier) =
+            (uiImage as? UiImage.Drawable)?.resId?.let {
+                it to it.toString()
+            } ?: (uiImage as? UiImage.Image)?.let { image ->
+                GlideUrl(image.url) { image.headers ?: emptyMap() } to image.url
+            } ?: return false
 
         return try {
             val builder = GlideApp.with(this)
-                .load(GlideUrl(url) { headers ?: emptyMap() }).transition(
-                    DrawableTransitionOptions.withCrossFade()
-                )
+                .load(glideImage)
                 .skipMemoryCache(true)
-                .diskCacheStrategy(DiskCacheStrategy.ALL)
+                .diskCacheStrategy(DiskCacheStrategy.ALL).let { req ->
+                    if (fadeIn)
+                        req.transition(DrawableTransitionOptions.withCrossFade())
+                    else req
+                }
+
+            if (colorCallback != null) {
+                builder.listener(object : RequestListener<Drawable> {
+                    @SuppressLint("CheckResult")
+                    override fun onResourceReady(
+                        resource: Drawable?,
+                        model: Any?,
+                        target: Target<Drawable>?,
+                        dataSource: DataSource?,
+                        isFirstResource: Boolean
+                    ): Boolean {
+                        resource?.toBitmapOrNull()
+                            ?.let { bitmap ->
+                                createPaletteAsync(
+                                    identifier,
+                                    bitmap,
+                                    colorCallback
+                                )
+                            }
+                        return false
+                    }
+
+                    @SuppressLint("CheckResult")
+                    override fun onLoadFailed(
+                        e: GlideException?,
+                        model: Any?,
+                        target: Target<Drawable>?,
+                        isFirstResource: Boolean
+                    ): Boolean {
+                        return false
+                    }
+                })
+            }
 
             val res = if (errorImageDrawable != null)
                 builder.error(errorImageDrawable).into(this)
@@ -325,7 +407,9 @@ object UIHelper {
         )
     }
 
-    fun Context.fixPaddingStatusbarView(v: View) {
+    fun Context.fixPaddingStatusbarView(v: View?) {
+        if (v == null) return
+
         val params = v.layoutParams
         params.height = getStatusBarHeight()
         v.layoutParams = params

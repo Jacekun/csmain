@@ -52,7 +52,7 @@ data class ExtractorLinkPlayList(
 )
 
 
-open class ExtractorLink(
+open class ExtractorLink constructor(
     open val source: String,
     open val name: String,
     override val url: String,
@@ -62,7 +62,24 @@ open class ExtractorLink(
     override val headers: Map<String, String> = mapOf(),
     /** Used for getExtractorVerifierJob() */
     open val extractorData: String? = null,
+    open val isDash: Boolean = false,
 ) : VideoDownloadManager.IDownloadableMinimum {
+    /**
+     * Old constructor without isDash, allows for backwards compatibility with extensions.
+     * Should be removed after all extensions have updated their cloudstream.jar
+     **/
+    constructor(
+        source: String,
+        name: String,
+        url: String,
+        referer: String,
+        quality: Int,
+        isM3u8: Boolean = false,
+        headers: Map<String, String> = mapOf(),
+        /** Used for getExtractorVerifierJob() */
+        extractorData: String? = null
+    ) : this(source, name, url, referer, quality, isM3u8, headers, extractorData, false)
+
     override fun toString(): String {
         return "ExtractorLink(name=$name, url=$url, referer=$referer, isM3u8=$isM3u8)"
     }
@@ -97,16 +114,16 @@ data class ExtractorSubtitleLink(
  */
 val schemaStripRegex = Regex("""^(https:|)//(www\.|)""")
 
-enum class Qualities(var value: Int) {
-    Unknown(400),
-    P144(144), // 144p
-    P240(240), // 240p
-    P360(360), // 360p
-    P480(480), // 480p
-    P720(720), // 720p
-    P1080(1080), // 1080p
-    P1440(1440), // 1440p
-    P2160(2160); // 4k or 2160p
+enum class Qualities(var value: Int, val defaultPriority: Int) {
+    Unknown(400, 4),
+    P144(144, 0), // 144p
+    P240(240, 2), // 240p
+    P360(360, 3), // 360p
+    P480(480, 4), // 480p
+    P720(720, 5), // 720p
+    P1080(1080, 6), // 1080p
+    P1440(1440, 7), // 1440p
+    P2160(2160, 8); // 4k or 2160p
 
     companion object {
         fun getStringByInt(qual: Int?): String {
@@ -116,6 +133,14 @@ enum class Qualities(var value: Int) {
                 P2160.value -> "4K"
                 null -> ""
                 else -> "${qual}p"
+            }
+        }
+        fun getStringByIntFull(quality: Int): String {
+            return when (quality) {
+                0 -> "Auto"
+                Unknown.value -> "Unknown"
+                P2160.value -> "4K"
+                else -> "${quality}p"
             }
         }
     }
@@ -205,6 +230,8 @@ val extractorApis: MutableList<ExtractorApi> = arrayListOf(
     VideovardSX(),
     Mp4Upload(),
     StreamTape(),
+    StreamTapeNet(),
+    ShaveTape(),
 
     //mixdrop extractors
     MixDropBz(),
@@ -217,6 +244,8 @@ val extractorApis: MutableList<ExtractorApi> = arrayListOf(
     XStreamCdn(),
 
     StreamSB(),
+    Sblona(),
+    Vidgomunimesb(),
     StreamSB1(),
     StreamSB2(),
     StreamSB3(),
@@ -227,6 +256,7 @@ val extractorApis: MutableList<ExtractorApi> = arrayListOf(
     StreamSB8(),
     StreamSB9(),
     StreamSB10(),
+    StreamSB11(),
     SBfull(),
     // Streamhub(), cause Streamhub2() works
     Streamhub2(),
@@ -235,6 +265,11 @@ val extractorApis: MutableList<ExtractorApi> = arrayListOf(
     Vidgomunime(),
     Sbflix(),
     Streamsss(),
+    Sbspeed(),
+    Sbsonic(),
+    Sbface(),
+    Sbrapid(),
+    Lvturbo(),
 
     Fastream(),
 
@@ -246,18 +281,23 @@ val extractorApis: MutableList<ExtractorApi> = arrayListOf(
     LayarKaca(),
     Rasacintaku(),
     FEnet(),
+    Kotakajair(),
+    Cdnplayer(),
     //  WatchSB(), 'cause StreamSB.kt works
     Uqload(),
     Uqload1(),
+    Uqload2(),
     Evoload(),
     Evoload1(),
-    VoeExtractor(),
     UpstreamExtractor(),
 
     Tomatomatela(),
+    TomatomatelalClub(),
     Cinestart(),
     OkRu(),
     OkRuHttps(),
+    Okrulink(),
+    Sendvid(),
 
     // dood extractors
     DoodCxExtractor(),
@@ -265,10 +305,12 @@ val extractorApis: MutableList<ExtractorApi> = arrayListOf(
     DoodToExtractor(),
     DoodSoExtractor(),
     DoodLaExtractor(),
+    Dooood(),
     DoodWsExtractor(),
     DoodShExtractor(),
     DoodWatchExtractor(),
     DoodWfExtractor(),
+    DoodYtExtractor(),
 
     AsianLoad(),
 
@@ -283,6 +325,8 @@ val extractorApis: MutableList<ExtractorApi> = arrayListOf(
     Userload(),
     Supervideo(),
     GuardareStream(),
+    CineGrabber(),
+    Vanfem(),
 
     // StreamSB.kt works
     //  SBPlay(),
@@ -312,10 +356,38 @@ val extractorApis: MutableList<ExtractorApi> = arrayListOf(
     DesuOdvip(),
     DesuDrive(),
 
+    Chillx(),
+    Moviesapi(),
+    Watchx(),
+    Bestx(),
+    Keephealth(),
+    Sbnet(),
+    Sbasian(),
+    Sblongvu(),
+    Fembed9hd(),
+    StreamM4u(),
+    Krakenfiles(),
+    Gofile(),
+    Vicloud(),
+    Uservideo(),
+
+    Movhide(),
+    StreamhideCom(),
+    StreamhideTo(),
+    Pixeldrain(),
+    Wibufile(),
+    FileMoonIn(),
+    Moviesm4u(),
     Filesim(),
+    Ahvsh(),
+    Guccihide(),
+    FileMoon(),
+    FileMoonSx(),
+    Vido(),
     Linkbox(),
     Acefile(),
     SpeedoStream(),
+    SpeedoStream1(),
     Zorofile(),
     Embedgram(),
     Mvidoo(),
@@ -323,6 +395,11 @@ val extractorApis: MutableList<ExtractorApi> = arrayListOf(
     Vidmoly(),
     Vidmolyme(),
     Voe(),
+    Tubeless(),
+    Moviehab(),
+    MoviehabNet(),
+    Jeniusplay(),
+    StreamoUpload(),
 
     Gdriveplayerapi(),
     Gdriveplayerapp(),
@@ -335,6 +412,7 @@ val extractorApis: MutableList<ExtractorApi> = arrayListOf(
     Gdriveplayerco(),
     Gdriveplayer(),
     DatabaseGdrive(),
+    DatabaseGdrive2(),
 
     YoutubeExtractor(),
     YoutubeShortLinkExtractor(),
@@ -345,6 +423,11 @@ val extractorApis: MutableList<ExtractorApi> = arrayListOf(
     VidSrcExtractor2(),
     PlayLtXyz(),
     AStreamHub(),
+
+    Cda(),
+    Dailymotion(),
+    ByteShare(),
+    Ztreamhub()
 )
 
 

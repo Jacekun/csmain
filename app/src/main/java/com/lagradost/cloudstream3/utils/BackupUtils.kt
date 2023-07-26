@@ -1,5 +1,6 @@
 package com.lagradost.cloudstream3.utils
 
+import android.annotation.SuppressLint
 import android.content.ContentValues
 import android.content.Context
 import android.net.Uri
@@ -8,28 +9,27 @@ import android.provider.MediaStore
 import android.widget.Toast
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.annotation.WorkerThread
 import androidx.fragment.app.FragmentActivity
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.fasterxml.jackson.module.kotlin.readValue
 import com.lagradost.cloudstream3.CommonActivity.showToast
 import com.lagradost.cloudstream3.R
-import com.lagradost.cloudstream3.apmap
 import com.lagradost.cloudstream3.mvvm.logError
 import com.lagradost.cloudstream3.plugins.PLUGINS_KEY
 import com.lagradost.cloudstream3.plugins.PLUGINS_KEY_LOCAL
 import com.lagradost.cloudstream3.syncproviders.providers.AniListApi.Companion.ANILIST_CACHED_LIST
-import com.lagradost.cloudstream3.syncproviders.providers.AniListApi.Companion.ANILIST_SHOULD_UPDATE_LIST
 import com.lagradost.cloudstream3.syncproviders.providers.AniListApi.Companion.ANILIST_TOKEN_KEY
 import com.lagradost.cloudstream3.syncproviders.providers.AniListApi.Companion.ANILIST_UNIXTIME_KEY
 import com.lagradost.cloudstream3.syncproviders.providers.AniListApi.Companion.ANILIST_USER_KEY
 import com.lagradost.cloudstream3.syncproviders.providers.MALApi.Companion.MAL_CACHED_LIST
 import com.lagradost.cloudstream3.syncproviders.providers.MALApi.Companion.MAL_REFRESH_TOKEN_KEY
-import com.lagradost.cloudstream3.syncproviders.providers.MALApi.Companion.MAL_SHOULD_UPDATE_LIST
 import com.lagradost.cloudstream3.syncproviders.providers.MALApi.Companion.MAL_TOKEN_KEY
 import com.lagradost.cloudstream3.syncproviders.providers.MALApi.Companion.MAL_UNIXTIME_KEY
 import com.lagradost.cloudstream3.syncproviders.providers.MALApi.Companion.MAL_USER_KEY
-import com.lagradost.cloudstream3.syncproviders.providers.OpenSubtitlesApi
 import com.lagradost.cloudstream3.syncproviders.providers.OpenSubtitlesApi.Companion.OPEN_SUBTITLES_USER_KEY
+import com.lagradost.cloudstream3.utils.Coroutines.ioSafe
+import com.lagradost.cloudstream3.utils.Coroutines.main
 import com.lagradost.cloudstream3.utils.DataStore.getDefaultSharedPrefs
 import com.lagradost.cloudstream3.utils.DataStore.getSharedPrefs
 import com.lagradost.cloudstream3.utils.DataStore.mapper
@@ -53,12 +53,10 @@ object BackupUtils {
         // When sharing backup we do not want to transfer what is essentially the password
         ANILIST_TOKEN_KEY,
         ANILIST_CACHED_LIST,
-        ANILIST_SHOULD_UPDATE_LIST,
         ANILIST_UNIXTIME_KEY,
         ANILIST_USER_KEY,
         MAL_TOKEN_KEY,
         MAL_REFRESH_TOKEN_KEY,
-        MAL_SHOULD_UPDATE_LIST,
         MAL_CACHED_LIST,
         MAL_UNIXTIME_KEY,
         MAL_USER_KEY,
@@ -76,7 +74,7 @@ object BackupUtils {
         return !nonTransferableKeys.contains(this)
     }
 
-    var restoreFileSelector: ActivityResultLauncher<Array<String>>? = null
+    private var restoreFileSelector: ActivityResultLauncher<Array<String>>? = null
 
     // Kinda hack, but I couldn't think of a better way
     data class BackupVars(
@@ -93,6 +91,7 @@ object BackupUtils {
         @JsonProperty("settings") val settings: BackupVars
     )
 
+    @Suppress("UNCHECKED_CAST")
     fun Context.getBackup(): BackupFile {
         val allData = getSharedPrefs().all.filter { it.key.isTransferable() }
         val allSettings = getDefaultSharedPrefs().all.filter { it.key.isTransferable() }
@@ -121,6 +120,7 @@ object BackupUtils {
         )
     }
 
+    @WorkerThread
     fun Context.restore(
         backupFile: BackupFile,
         restoreSettings: Boolean,
@@ -145,64 +145,66 @@ object BackupUtils {
         }
     }
 
+    @SuppressLint("SimpleDateFormat")
     fun FragmentActivity.backup() {
         try {
-            if (checkWrite()) {
-                val subDir = getBasePath().first
-                val date = SimpleDateFormat("yyyy_MM_dd_HH_mm").format(Date(currentTimeMillis()))
-                val ext = "json"
-                val displayName = "CS3_Backup_${date}"
-                val backupFile = getBackup()
-
-                val steam =
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && subDir?.isDownloadDir() == true) {
-                        val cr = this.contentResolver
-                        val contentUri =
-                            MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY) // USE INSTEAD OF MediaStore.Downloads.EXTERNAL_CONTENT_URI
-                        //val currentMimeType = MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension)
-
-                        val newFile = ContentValues().apply {
-                            put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
-                            put(MediaStore.MediaColumns.TITLE, displayName)
-                            // While it a json file we store as txt because not
-                            // all file managers support mimetype json
-                            put(MediaStore.MediaColumns.MIME_TYPE, "text/plain")
-                            //put(MediaStore.MediaColumns.RELATIVE_PATH, folder)
-                        }
-
-                        val newFileUri = cr.insert(
-                            contentUri,
-                            newFile
-                        ) ?: throw IOException("Error creating file uri")
-                        cr.openOutputStream(newFileUri, "w")
-                            ?: throw IOException("Error opening stream")
-                    } else {
-                        val fileName = "$displayName.$ext"
-                        val rFile = subDir?.findFile(fileName)
-                        if (rFile?.exists() == true) {
-                            rFile.delete()
-                        }
-                        val file =
-                            subDir?.createFile(fileName)
-                                ?: throw IOException("Error creating file")
-                        if (!file.exists()) throw IOException("File does not exist")
-                        file.openOutputStream()
-                    }
-
-                val printStream = PrintWriter(steam)
-                printStream.print(mapper.writeValueAsString(backupFile))
-                printStream.close()
-
-                showToast(
-                    this,
-                    R.string.backup_success,
-                    Toast.LENGTH_LONG
-                )
-            } else {
+            if (!checkWrite()) {
                 showToast(this, getString(R.string.backup_failed), Toast.LENGTH_LONG)
                 requestRW()
                 return
             }
+
+            val subDir = getBasePath().first
+            val date = SimpleDateFormat("yyyy_MM_dd_HH_mm").format(Date(currentTimeMillis()))
+            val ext = "json"
+            val displayName = "CS3_Backup_${date}"
+            val backupFile = getBackup()
+
+            val steam = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+                && subDir?.isDownloadDir() == true
+            ) {
+                val cr = this.contentResolver
+                val contentUri =
+                    MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY) // USE INSTEAD OF MediaStore.Downloads.EXTERNAL_CONTENT_URI
+                //val currentMimeType = MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension)
+
+                val newFile = ContentValues().apply {
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
+                    put(MediaStore.MediaColumns.TITLE, displayName)
+                    // While it a json file we store as txt because not
+                    // all file managers support mimetype json
+                    put(MediaStore.MediaColumns.MIME_TYPE, "text/plain")
+                    //put(MediaStore.MediaColumns.RELATIVE_PATH, folder)
+                }
+
+                val newFileUri = cr.insert(
+                    contentUri,
+                    newFile
+                ) ?: throw IOException("Error creating file uri")
+                cr.openOutputStream(newFileUri, "w")
+                    ?: throw IOException("Error opening stream")
+            } else {
+                val fileName = "$displayName.$ext"
+                val rFile = subDir?.findFile(fileName)
+                if (rFile?.exists() == true) {
+                    rFile.delete()
+                }
+                val file =
+                    subDir?.createFile(fileName)
+                        ?: throw IOException("Error creating file")
+                if (!file.exists()) throw IOException("File does not exist")
+                file.openOutputStream()
+            }
+
+            val printStream = PrintWriter(steam)
+            printStream.print(mapper.writeValueAsString(backupFile))
+            printStream.close()
+
+            showToast(
+                this,
+                R.string.backup_success,
+                Toast.LENGTH_LONG
+            )
         } catch (e: Exception) {
             logError(e)
             try {
@@ -221,31 +223,29 @@ object BackupUtils {
         try {
             restoreFileSelector =
                 registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
-                    this.let { activity ->
-                        uri?.let {
-                            try {
-                                val input =
-                                    activity.contentResolver.openInputStream(uri)
-                                        ?: return@registerForActivityResult
+                    if (uri == null) return@registerForActivityResult
+                    val activity = this
+                    ioSafe {
+                        try {
+                            val input = activity.contentResolver.openInputStream(uri)
+                                ?: return@ioSafe
 
-                                val restoredValue =
-                                    mapper.readValue<BackupFile>(input)
-                                activity.restore(
-                                    restoredValue,
-                                    restoreSettings = true,
-                                    restoreDataStore = true
+                            val restoredValue =
+                                mapper.readValue<BackupFile>(input)
+
+                            activity.restore(
+                                restoredValue,
+                                restoreSettings = true,
+                                restoreDataStore = true
+                            )
+                            activity.runOnUiThread { activity.recreate() }
+                        } catch (e: Exception) {
+                            logError(e)
+                            main { // smth can fail in .format
+                                showToast(
+                                    activity,
+                                    getString(R.string.restore_failed_format).format(e.toString())
                                 )
-                                activity.recreate()
-                            } catch (e: Exception) {
-                                logError(e)
-                                try { // smth can fail in .format
-                                    showToast(
-                                        activity,
-                                        getString(R.string.restore_failed_format).format(e.toString())
-                                    )
-                                } catch (e: Exception) {
-                                    logError(e)
-                                }
                             }
                         }
                     }
@@ -266,6 +266,7 @@ object BackupUtils {
                         "application/json",
                         "unknown/unknown",
                         "content/unknown",
+                        "application/octet-stream",
                     )
                 )
             } catch (e: Exception) {

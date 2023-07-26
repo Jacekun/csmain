@@ -1,11 +1,12 @@
 package com.lagradost.cloudstream3.utils
 
+import android.animation.ObjectAnimator
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.app.Activity.RESULT_CANCELED
-import android.content.ContentValues
-import android.content.Context
-import android.content.Intent
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.content.*
 import android.content.pm.PackageManager
 import android.database.Cursor
 import android.media.AudioAttributes
@@ -15,56 +16,63 @@ import android.media.tv.TvContract.Channels.COLUMN_INTERNAL_PROVIDER_ID
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.Uri
-import android.os.Build
-import android.os.Environment
-import android.os.ParcelFileDescriptor
+import android.os.*
 import android.provider.MediaStore
 import android.text.Spanned
 import android.util.Log
+import android.view.animation.DecelerateInterpolator
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.RequiresApi
 import androidx.annotation.WorkerThread
 import androidx.appcompat.app.AlertDialog
-import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.text.HtmlCompat
 import androidx.core.text.toSpanned
+import androidx.core.widget.ContentLoadingProgressBar
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentActivity
 import androidx.navigation.fragment.findNavController
+import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
-import androidx.tvprovider.media.tv.PreviewChannelHelper
-import androidx.tvprovider.media.tv.TvContractCompat
-import androidx.tvprovider.media.tv.WatchNextProgram
+import androidx.tvprovider.media.tv.*
 import androidx.tvprovider.media.tv.WatchNextProgram.fromCursor
+import androidx.viewpager2.widget.ViewPager2
 import com.fasterxml.jackson.module.kotlin.readValue
 import com.google.android.gms.cast.framework.CastContext
 import com.google.android.gms.cast.framework.CastState
 import com.google.android.gms.common.ConnectionResult
 import com.google.android.gms.common.GoogleApiAvailability
 import com.google.android.gms.common.wrappers.Wrappers
+import com.google.android.material.bottomsheet.BottomSheetDialog
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.CommonActivity.showToast
 import com.lagradost.cloudstream3.MainActivity.Companion.afterRepositoryLoadedEvent
 import com.lagradost.cloudstream3.mvvm.logError
 import com.lagradost.cloudstream3.mvvm.normalSafeApiCall
 import com.lagradost.cloudstream3.plugins.RepositoryManager
+import com.lagradost.cloudstream3.syncproviders.AccountManager.Companion.appStringResumeWatching
 import com.lagradost.cloudstream3.ui.WebviewFragment
 import com.lagradost.cloudstream3.ui.result.ResultFragment
 import com.lagradost.cloudstream3.ui.settings.SettingsFragment.Companion.isTrueTvSettings
+import com.lagradost.cloudstream3.ui.settings.SettingsFragment.Companion.isTvSettings
 import com.lagradost.cloudstream3.ui.settings.extensions.PluginsViewModel.Companion.downloadAll
 import com.lagradost.cloudstream3.ui.settings.extensions.RepositoryData
 import com.lagradost.cloudstream3.utils.Coroutines.ioSafe
 import com.lagradost.cloudstream3.utils.Coroutines.main
+import com.lagradost.cloudstream3.utils.DataStoreHelper.getAllResumeStateIds
+import com.lagradost.cloudstream3.utils.DataStoreHelper.getLastWatched
 import com.lagradost.cloudstream3.utils.FillerEpisodeCheck.toClassDir
 import com.lagradost.cloudstream3.utils.JsUnpacker.Companion.load
 import com.lagradost.cloudstream3.utils.UIHelper.navigate
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import okhttp3.Cache
 import java.io.*
 import java.net.URL
 import java.net.URLDecoder
+import kotlin.system.measureTimeMillis
 
 object AppUtils {
     fun RecyclerView.setMaxViewPoolSize(maxViewTypeId: Int, maxPoolSize: Int) {
@@ -77,6 +85,19 @@ object AppUtils {
             this.layoutManager as? LinearLayoutManager?
         val adapter = adapter
         return if (layoutManager == null || adapter == null) false else layoutManager.findLastCompletelyVisibleItemPosition() < adapter.itemCount - 7 // bit more than 1 to make it more seamless
+    }
+
+    fun BottomSheetDialog?.ownHide() {
+        this?.hide()
+    }
+
+    fun BottomSheetDialog?.ownShow() {
+        // the reason for this is because show has a shitty animation we don't want
+        this?.window?.setWindowAnimations(-1)
+        this?.show()
+        Handler(Looper.getMainLooper()).postDelayed({
+            this?.window?.setWindowAnimations(R.style.Animation_Design_BottomSheetDialog)
+        }, 200)
     }
 
     //fun Context.deleteFavorite(data: SearchResponse) {
@@ -110,7 +131,8 @@ object AppUtils {
     @SuppressLint("RestrictedApi")
     private fun buildWatchNextProgramUri(
         context: Context,
-        card: DataStoreHelper.ResumeWatchingResult
+        card: DataStoreHelper.ResumeWatchingResult,
+        resumeWatching: VideoDownloadHelper.ResumeWatching?
     ): WatchNextProgram {
         val isSeries = card.type?.isMovieType() == false
         val title = if (isSeries) {
@@ -129,15 +151,18 @@ object AppUtils {
             .setWatchNextType(TvContractCompat.WatchNextPrograms.WATCH_NEXT_TYPE_CONTINUE)
             .setTitle(title)
             .setPosterArtUri(Uri.parse(card.posterUrl))
-            .setIntentUri(Uri.parse(card.url)) //TODO FIX intent
+            .setIntentUri(Uri.parse(card.id?.let {
+                "$appStringResumeWatching://$it"
+            } ?: card.url))
             .setInternalProviderId(card.url)
-        //.setLastEngagementTimeUtcMillis(System.currentTimeMillis())
+            .setLastEngagementTimeUtcMillis(
+                resumeWatching?.updateTime ?: System.currentTimeMillis()
+            )
 
         card.watchPos?.let {
             builder.setDurationMillis(it.duration.toInt())
             builder.setLastPlaybackPositionMillis(it.position.toInt())
         }
-        // .setLastEngagementTimeUtcMillis() //TODO
 
         if (isSeries)
             card.episode?.let {
@@ -145,6 +170,69 @@ object AppUtils {
             }
 
         return builder.build()
+    }
+
+    // https://stackoverflow.com/a/67441735/13746422
+    fun ViewPager2.reduceDragSensitivity(f: Int = 4) {
+        val recyclerViewField = ViewPager2::class.java.getDeclaredField("mRecyclerView")
+        recyclerViewField.isAccessible = true
+        val recyclerView = recyclerViewField.get(this) as RecyclerView
+
+        val touchSlopField = RecyclerView::class.java.getDeclaredField("mTouchSlop")
+        touchSlopField.isAccessible = true
+        val touchSlop = touchSlopField.get(recyclerView) as Int
+        touchSlopField.set(recyclerView, touchSlop * f)       // "8" was obtained experimentally
+    }
+
+    fun ContentLoadingProgressBar?.animateProgressTo(to: Int) {
+        if (this == null) return
+        val animation: ObjectAnimator = ObjectAnimator.ofInt(
+            this,
+            "progress",
+            this.progress,
+            to
+        )
+        animation.duration = 500
+        animation.setAutoCancel(true)
+        animation.interpolator = DecelerateInterpolator()
+        animation.start()
+    }
+
+    fun Context.createNotificationChannel(channelId: String, channelName: String, description: String) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val importance = NotificationManager.IMPORTANCE_DEFAULT
+            val channel =
+                NotificationChannel(channelId, channelName, importance).apply {
+                    this.description = description
+                }
+
+            // Register the channel with the system.
+            val notificationManager: NotificationManager =
+                this.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+
+            notificationManager.createNotificationChannel(channel)
+        }
+    }
+
+    @SuppressLint("RestrictedApi")
+    fun getAllWatchNextPrograms(context: Context): Set<Long> {
+        val COLUMN_WATCH_NEXT_ID_INDEX = 0
+        val cursor = context.contentResolver.query(
+            TvContractCompat.WatchNextPrograms.CONTENT_URI,
+            WatchNextProgram.PROJECTION,
+            /* selection = */ null,
+            /* selectionArgs = */ null,
+            /* sortOrder = */ null
+        )
+        val set = mutableSetOf<Long>()
+        cursor?.use {
+            if (it.moveToFirst()) {
+                do {
+                    set.add(cursor.getLong(COLUMN_WATCH_NEXT_ID_INDEX))
+                } while (it.moveToNext())
+            }
+        }
+        return set
     }
 
     /**
@@ -164,7 +252,7 @@ object AppUtils {
             WatchNextProgram.PROJECTION,
             /* selection = */ null,
             /* selectionArgs = */ null,
-            /* sortOrder= */ null
+            /* sortOrder = */ null
         )
         cursor?.use {
             if (it.moveToFirst()) {
@@ -195,17 +283,32 @@ object AppUtils {
         }
     }
 
+    /** Prevents losing data when removing and adding simultaneously */
+    private val continueWatchingLock = Mutex()
+
     // https://github.com/googlearchive/leanback-homescreen-channels/blob/master/app/src/main/java/com/google/android/tvhomescreenchannels/SampleTvProvider.java
     @SuppressLint("RestrictedApi")
     @WorkerThread
-    fun Context.addProgramsToContinueWatching(data: List<DataStoreHelper.ResumeWatchingResult>) {
+    suspend fun Context.addProgramsToContinueWatching(data: List<DataStoreHelper.ResumeWatchingResult>) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val context = this
-        ioSafe {
-            data.forEach { episodeInfo ->
+        continueWatchingLock.withLock {
+            // A way to get all last watched timestamps
+            val timeStampHashMap = HashMap<Int, VideoDownloadHelper.ResumeWatching>()
+            getAllResumeStateIds()?.forEach { id ->
+                val lastWatched = getLastWatched(id) ?: return@forEach
+                timeStampHashMap[lastWatched.parentId] = lastWatched
+            }
+
+            val currentProgramIds = data.mapNotNull { episodeInfo ->
                 try {
-                    val (program, id) = getWatchNextProgramByVideoId(episodeInfo.url, context)
-                    val nextProgram = buildWatchNextProgramUri(context, episodeInfo)
+                    val customId = "${episodeInfo.id}|${episodeInfo.apiName}|${episodeInfo.url}"
+                    val (program, id) = getWatchNextProgramByVideoId(customId, context)
+                    val nextProgram = buildWatchNextProgramUri(
+                        context,
+                        episodeInfo,
+                        timeStampHashMap[episodeInfo.id]
+                    )
 
                     // If the program is already in the Watch Next row, update it
                     if (program != null && id != null) {
@@ -213,13 +316,25 @@ object AppUtils {
                             nextProgram,
                             id,
                         )
+                        id
                     } else {
                         PreviewChannelHelper(context)
                             .publishWatchNextProgram(nextProgram)
                     }
                 } catch (e: Exception) {
                     logError(e)
+                    null
                 }
+            }.toSet()
+
+            val allOldPrograms = getAllWatchNextPrograms(context) - currentProgramIds
+
+            // Ensures synced watch next progress by deleting all old programs.
+            allOldPrograms.forEach {
+                context.contentResolver.delete(
+                    TvContractCompat.buildWatchNextProgramUri(it),
+                    null, null
+                )
             }
         }
     }
@@ -264,6 +379,46 @@ object AppUtils {
         }
     }
 
+    abstract class DiffAdapter<T>(
+        open val items: MutableList<T>,
+        val comparison: (first: T, second: T) -> Boolean = { first, second ->
+            first.hashCode() == second.hashCode()
+        }
+    ) :
+        RecyclerView.Adapter<RecyclerView.ViewHolder>() {
+        override fun getItemCount(): Int {
+            return items.size
+        }
+
+        fun updateList(newList: List<T>) {
+            val diffResult = DiffUtil.calculateDiff(
+                GenericDiffCallback(this.items, newList)
+            )
+
+            items.clear()
+            items.addAll(newList)
+
+            diffResult.dispatchUpdatesTo(this)
+        }
+
+        inner class GenericDiffCallback(
+            private val oldList: List<T>,
+            private val newList: List<T>
+        ) :
+            DiffUtil.Callback() {
+            override fun areItemsTheSame(oldItemPosition: Int, newItemPosition: Int) =
+                comparison(oldList[oldItemPosition], newList[newItemPosition])
+
+            override fun getOldListSize() = oldList.size
+
+            override fun getNewListSize() = newList.size
+
+            override fun areContentsTheSame(oldItemPosition: Int, newItemPosition: Int) =
+                oldList[oldItemPosition] == newList[newItemPosition]
+        }
+    }
+
+
     fun Activity.downloadAllPluginsDialog(repositoryUrl: String, repositoryName: String) {
         runOnUiThread {
             val context = this
@@ -279,9 +434,9 @@ object AppUtils {
                     downloadAll(context, repositoryUrl, null)
                 }
 
-                setNegativeButton(R.string.cancel) { _, _ -> }
+                setNegativeButton(R.string.no) { _, _ -> }
             }
-            builder.show()
+            builder.show().setDefaultFocus()
         }
     }
 
@@ -334,6 +489,12 @@ object AppUtils {
                 openWebView(fragment, url)
             }
         }
+    }
+
+    fun Context.isNetworkAvailable(): Boolean {
+        val manager = this.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val activeNetworkInfo = manager.activeNetworkInfo
+        return activeNetworkInfo != null && activeNetworkInfo.isConnected || manager.allNetworkInfo?.any { it.isConnected } ?: false
     }
 
     fun splitQuery(url: URL): Map<String, String> {
@@ -504,6 +665,17 @@ object AppUtils {
         return false
     }
 
+    /**
+     * Sets the focus to the negative button when in TV and Emulator layout.
+     **/
+    fun AlertDialog.setDefaultFocus(buttonFocus: Int = DialogInterface.BUTTON_NEGATIVE) {
+        if (!isTvSettings()) return
+        this.getButton(buttonFocus).run {
+            isFocusableInTouchMode = true
+            requestFocus()
+        }
+    }
+
     // Copied from https://github.com/videolan/vlc-android/blob/master/application/vlc-android/src/org/videolan/vlc/util/FileUtils.kt
     @SuppressLint("Range")
     fun Context.getUri(data: Uri?): Uri? {
@@ -604,8 +776,13 @@ object AppUtils {
         return networkInfo.any {
             conManager.getNetworkCapabilities(it)
                 ?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) == true
+                    } &&
+                !networkInfo.any {
+                    conManager.getNetworkCapabilities(it)
+                        ?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+                }
         }
-    }
+
 
     private fun Activity?.cacheClass(clazz: String?) {
         clazz?.let { c ->

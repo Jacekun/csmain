@@ -53,6 +53,10 @@ fun <T> LifecycleOwner.observe(liveData: LiveData<T>, action: (t: T) -> Unit) {
     liveData.observe(this) { it?.let { t -> action(t) } }
 }
 
+fun <T> LifecycleOwner.observeNullable(liveData: LiveData<T>, action: (t: T) -> Unit) {
+    liveData.observe(this) { action(it) }
+}
+
 inline fun <reified T : Any> some(value: T?): Some<T> {
     return if (value == null) {
         Some.None
@@ -117,13 +121,21 @@ suspend fun <T> suspendSafeApiCall(apiCall: suspend () -> T): T? {
     }
 }
 
+fun Throwable.getAllMessages(): String {
+    return (this.localizedMessage ?: "") + (this.cause?.getAllMessages()?.let { "\n$it" } ?: "")
+}
+
+fun Throwable.getStackTracePretty(showMessage: Boolean = true): String {
+    val prefix = if (showMessage) this.localizedMessage?.let { "\n$it" } ?: "" else ""
+    return prefix + this.stackTrace.joinToString(
+        separator = "\n"
+    ) {
+        "${it.fileName} ${it.lineNumber}"
+    }
+}
+
 fun <T> safeFail(throwable: Throwable): Resource<T> {
-    val stackTraceMsg =
-        (throwable.localizedMessage ?: "") + "\n\n" + throwable.stackTrace.joinToString(
-            separator = "\n"
-        ) {
-            "${it.fileName} ${it.lineNumber}"
-        }
+    val stackTraceMsg = throwable.getStackTracePretty()
     return Resource.Failure(false, null, null, stackTraceMsg)
 }
 

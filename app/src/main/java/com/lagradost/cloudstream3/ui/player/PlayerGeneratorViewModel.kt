@@ -9,10 +9,12 @@ import com.lagradost.cloudstream3.mvvm.Resource
 import com.lagradost.cloudstream3.mvvm.launchSafe
 import com.lagradost.cloudstream3.mvvm.normalSafeApiCall
 import com.lagradost.cloudstream3.mvvm.safeApiCall
+import com.lagradost.cloudstream3.ui.result.ResultEpisode
+import com.lagradost.cloudstream3.utils.Coroutines.ioSafe
+import com.lagradost.cloudstream3.utils.EpisodeSkip
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorUri
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.launch
 
 class PlayerGeneratorViewModel : ViewModel() {
     companion object {
@@ -29,6 +31,16 @@ class PlayerGeneratorViewModel : ViewModel() {
 
     private val _loadingLinks = MutableLiveData<Resource<Boolean?>>()
     val loadingLinks: LiveData<Resource<Boolean?>> = _loadingLinks
+
+    private val _currentStamps = MutableLiveData<List<EpisodeSkip.SkipStamp>>(emptyList())
+    val currentStamps: LiveData<List<EpisodeSkip.SkipStamp>> = _currentStamps
+
+    private val _currentSubtitleYear = MutableLiveData<Int?>(null)
+    val currentSubtitleYear: LiveData<Int?> = _currentSubtitleYear
+
+    fun setSubtitleYear(year: Int?) {
+        _currentSubtitleYear.postValue(year)
+    }
 
     fun getId(): Int? {
         return generator?.getCurrentId()
@@ -108,39 +120,69 @@ class PlayerGeneratorViewModel : ViewModel() {
         // Do not post if there's nothing new
         // Posting will refresh subtitles which will in turn
         // make the subs to english if previously unselected
-        if (allSubs != currentSubs)
+        if (allSubs != currentSubs) {
             _currentSubs.postValue(allSubs)
+        }
     }
 
     private var currentJob: Job? = null
+    private var currentStampJob: Job? = null
+
+    fun loadStamps(duration: Long) {
+        //currentStampJob?.cancel()
+        currentStampJob = ioSafe {
+            val meta = generator?.getCurrent()
+            val page = (generator as? RepoLinkGenerator?)?.page
+            if (page != null && meta is ResultEpisode) {
+                _currentStamps.postValue(listOf())
+                _currentStamps.postValue(
+                    EpisodeSkip.getStamps(
+                        page,
+                        meta,
+                        duration,
+                        hasNextEpisode() ?: false
+                    )
+                )
+            }
+        }
+    }
 
     fun loadLinks(clearCache: Boolean = false, isCasting: Boolean = false) {
         Log.i(TAG, "loadLinks")
         currentJob?.cancel()
+
         currentJob = viewModelScope.launchSafe {
             val currentLinks = mutableSetOf<Pair<ExtractorLink?, ExtractorUri?>>()
             val currentSubs = mutableSetOf<SubtitleData>()
 
             // clear old data
-            _currentSubs.postValue(currentSubs)
-            _currentLinks.postValue(currentLinks)
+            _currentSubs.postValue(emptySet())
+            _currentLinks.postValue(emptySet())
 
             // load more data
             _loadingLinks.postValue(Resource.Loading())
             val loadingState = safeApiCall {
                 generator?.generateLinks(clearCache = clearCache, isCasting = isCasting, {
                     currentLinks.add(it)
-                    _currentLinks.postValue(currentLinks)
+                    // Clone to prevent ConcurrentModificationException
+                    normalSafeApiCall {
+                        // Extra normalSafeApiCall since .toSet() iterates.
+                        _currentLinks.postValue(currentLinks.toSet())
+                    }
                 }, {
                     currentSubs.add(it)
-                    // _currentSubs.postValue(currentSubs) // this causes ConcurrentModificationException, so fuck it
+                    normalSafeApiCall {
+                        _currentSubs.postValue(currentSubs.toSet())
+                    }
                 })
             }
 
             _loadingLinks.postValue(loadingState)
-
             _currentLinks.postValue(currentLinks)
-            _currentSubs.postValue(currentSubs)
+            _currentSubs.postValue(
+                currentSubs.union(_currentSubs.value ?: emptySet())
+            )
         }
+
     }
 }

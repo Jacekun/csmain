@@ -1,26 +1,24 @@
 package com.lagradost.cloudstream3.ui.settings
 
-import android.content.Context
 import android.os.Bundle
 import android.view.View
+import androidx.navigation.NavOptions
+import androidx.navigation.fragment.findNavController
 import androidx.preference.PreferenceFragmentCompat
 import androidx.preference.PreferenceManager
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.APIHolder.getApiDubstatusSettings
 import com.lagradost.cloudstream3.APIHolder.getApiProviderLangSettings
 import com.lagradost.cloudstream3.AcraApplication.Companion.removeKey
-import com.lagradost.cloudstream3.mvvm.logError
 import com.lagradost.cloudstream3.ui.APIRepository
 import com.lagradost.cloudstream3.ui.settings.SettingsFragment.Companion.getPref
 import com.lagradost.cloudstream3.ui.settings.SettingsFragment.Companion.setPaddingBottom
 import com.lagradost.cloudstream3.ui.settings.SettingsFragment.Companion.setUpToolbar
 import com.lagradost.cloudstream3.utils.USER_SELECTED_HOMEPAGE_API
-import com.lagradost.cloudstream3.utils.SingleSelectionHelper.showDialog
 import com.lagradost.cloudstream3.utils.SingleSelectionHelper.showMultiDialog
 import com.lagradost.cloudstream3.utils.SubtitleHelper
 import com.lagradost.cloudstream3.utils.UIHelper.hideKeyboard
-
-
+import com.lagradost.cloudstream3.utils.UIHelper.navigate
 
 class SettingsProviders : PreferenceFragmentCompat() {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
@@ -61,15 +59,33 @@ class SettingsProviders : PreferenceFragmentCompat() {
             return@setOnPreferenceClickListener true
         }
 
+        getPref(R.string.test_providers_key)?.setOnPreferenceClickListener {
+            // Somehow animations do not work without this.
+            val options = NavOptions.Builder()
+                .setEnterAnim(R.anim.enter_anim)
+                .setExitAnim(R.anim.exit_anim)
+                .setPopEnterAnim(R.anim.pop_enter)
+                .setPopExitAnim(R.anim.pop_exit)
+                .build()
+
+            this@SettingsProviders.findNavController()
+                .navigate(R.id.navigation_test_providers, null, options)
+            true
+        }
+
         getPref(R.string.prefer_media_type_key)?.setOnPreferenceClickListener {
             val names = enumValues<TvType>().sorted().map { it.name }
-            val default = enumValues<TvType>().sorted().filter { it != TvType.NSFW }.map { it.ordinal }
+            val default =
+                enumValues<TvType>().sorted().filter { it != TvType.NSFW }.map { it.ordinal }
             val defaultSet = default.map { it.toString() }.toSet()
             val currentList = try {
-                settingsManager.getStringSet(getString(R.string.prefer_media_type_key), defaultSet)?.map {
-                    it.toInt()
-                }
-            } catch (e: Throwable) { null }  ?: default
+                settingsManager.getStringSet(getString(R.string.prefer_media_type_key), defaultSet)
+                    ?.map {
+                        it.toInt()
+                    }
+            } catch (e: Throwable) {
+                null
+            } ?: default
 
             activity?.showMultiDialog(
                 names,
@@ -89,19 +105,22 @@ class SettingsProviders : PreferenceFragmentCompat() {
 
         getPref(R.string.provider_lang_key)?.setOnPreferenceClickListener {
             activity?.getApiProviderLangSettings()?.let { current ->
-                val langs = APIHolder.apis.map { it.lang }.toSet()
-                    .sortedBy { SubtitleHelper.fromTwoLettersToLanguage(it) }
+                val languages = APIHolder.apis.map { it.lang }.toSet()
+                    .sortedBy { SubtitleHelper.fromTwoLettersToLanguage(it) } + AllLanguagesName
 
-                val currentList = ArrayList<Int>()
-                for (i in current) {
-                    currentList.add(langs.indexOf(i))
+                val currentList = current.map {
+                    languages.indexOf(it)
                 }
 
-                val names = langs.map {
-                    val emoji = SubtitleHelper.getFlagFromIso(it)
-                    val name = SubtitleHelper.fromTwoLettersToLanguage(it)
-                    val fullName = "$emoji $name"
-                    Pair(it, fullName)
+                val names = languages.map {
+                    if (it == AllLanguagesName) {
+                        Pair(it, getString(R.string.all_languages_preference))
+                    } else {
+                        val emoji = SubtitleHelper.getFlagFromIso(it)
+                        val name = SubtitleHelper.fromTwoLettersToLanguage(it)
+                        val fullName = "$emoji $name"
+                        Pair(it, fullName)
+                    }
                 }
 
                 activity?.showMultiDialog(

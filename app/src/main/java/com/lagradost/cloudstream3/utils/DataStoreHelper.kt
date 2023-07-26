@@ -1,20 +1,23 @@
 package com.lagradost.cloudstream3.utils
 
 import com.fasterxml.jackson.annotation.JsonProperty
+import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.APIHolder.unixTimeMS
 import com.lagradost.cloudstream3.AcraApplication.Companion.getKey
 import com.lagradost.cloudstream3.AcraApplication.Companion.getKeys
 import com.lagradost.cloudstream3.AcraApplication.Companion.removeKey
 import com.lagradost.cloudstream3.AcraApplication.Companion.removeKeys
 import com.lagradost.cloudstream3.AcraApplication.Companion.setKey
-import com.lagradost.cloudstream3.DubStatus
-import com.lagradost.cloudstream3.SearchQuality
-import com.lagradost.cloudstream3.SearchResponse
-import com.lagradost.cloudstream3.TvType
+import com.lagradost.cloudstream3.syncproviders.AccountManager
+import com.lagradost.cloudstream3.syncproviders.SyncAPI
 import com.lagradost.cloudstream3.ui.WatchType
+import com.lagradost.cloudstream3.ui.result.VideoWatchState
 
 const val VIDEO_POS_DUR = "video_pos_dur"
+const val VIDEO_WATCH_STATE = "video_watch_state"
 const val RESULT_WATCH_STATE = "result_watch_state"
 const val RESULT_WATCH_STATE_DATA = "result_watch_state_data"
+const val RESULT_SUBSCRIBED_STATE_DATA = "result_subscribed_state_data"
 const val RESULT_RESUME_WATCHING = "result_resume_watching_2" // changed due to id changes
 const val RESULT_RESUME_WATCHING_OLD = "result_resume_watching"
 const val RESULT_RESUME_WATCHING_HAS_MIGRATED = "result_resume_watching_migrated"
@@ -37,6 +40,37 @@ object DataStoreHelper {
         return this
     }
 
+    /**
+     * Used to display notifications on new episodes and posters in library.
+     **/
+    data class SubscribedData(
+        @JsonProperty("id") override var id: Int?,
+        @JsonProperty("subscribedTime") val bookmarkedTime: Long,
+        @JsonProperty("latestUpdatedTime") val latestUpdatedTime: Long,
+        @JsonProperty("lastSeenEpisodeCount") val lastSeenEpisodeCount: Map<DubStatus, Int?>,
+        @JsonProperty("name") override val name: String,
+        @JsonProperty("url") override val url: String,
+        @JsonProperty("apiName") override val apiName: String,
+        @JsonProperty("type") override var type: TvType? = null,
+        @JsonProperty("posterUrl") override var posterUrl: String?,
+        @JsonProperty("year") val year: Int?,
+        @JsonProperty("quality") override var quality: SearchQuality? = null,
+        @JsonProperty("posterHeaders") override var posterHeaders: Map<String, String>? = null,
+    ) : SearchResponse {
+        fun toLibraryItem(): SyncAPI.LibraryItem? {
+            return SyncAPI.LibraryItem(
+                name,
+                url,
+                id?.toString() ?: return null,
+                null,
+                null,
+                null,
+                latestUpdatedTime,
+                apiName, type, posterUrl, posterHeaders, quality, this.id
+            )
+        }
+    }
+
     data class BookmarkedData(
         @JsonProperty("id") override var id: Int?,
         @JsonProperty("bookmarkedTime") val bookmarkedTime: Long,
@@ -49,7 +83,20 @@ object DataStoreHelper {
         @JsonProperty("year") val year: Int?,
         @JsonProperty("quality") override var quality: SearchQuality? = null,
         @JsonProperty("posterHeaders") override var posterHeaders: Map<String, String>? = null,
-    ) : SearchResponse
+    ) : SearchResponse {
+        fun toLibraryItem(id: String): SyncAPI.LibraryItem {
+            return SyncAPI.LibraryItem(
+                name,
+                url,
+                id,
+                null,
+                null,
+                null,
+                latestUpdatedTime,
+                apiName, type, posterUrl, posterHeaders, quality, this.id
+            )
+        }
+    }
 
     data class ResumeWatchingResult(
         @JsonProperty("name") override val name: String,
@@ -57,9 +104,7 @@ object DataStoreHelper {
         @JsonProperty("apiName") override val apiName: String,
         @JsonProperty("type") override var type: TvType? = null,
         @JsonProperty("posterUrl") override var posterUrl: String?,
-
         @JsonProperty("watchPos") val watchPos: PosDur?,
-
         @JsonProperty("id") override var id: Int?,
         @JsonProperty("parentId") val parentId: Int?,
         @JsonProperty("episode") val episode: Int?,
@@ -69,7 +114,10 @@ object DataStoreHelper {
         @JsonProperty("posterHeaders") override var posterHeaders: Map<String, String>? = null,
     ) : SearchResponse
 
-    private var currentAccount: String = "0" //TODO ACCOUNT IMPLEMENTATION
+    /**
+     * A datastore wide account for future implementations of a multiple account system
+     **/
+    var currentAccount: String = "0" //TODO ACCOUNT IMPLEMENTATION
 
     fun getAllWatchStateIds(): List<Int>? {
         val folder = "$currentAccount/$RESULT_WATCH_STATE"
@@ -175,11 +223,47 @@ object DataStoreHelper {
     fun setBookmarkedData(id: Int?, data: BookmarkedData) {
         if (id == null) return
         setKey("$currentAccount/$RESULT_WATCH_STATE_DATA", id.toString(), data)
+        AccountManager.localListApi.requireLibraryRefresh = true
     }
 
     fun getBookmarkedData(id: Int?): BookmarkedData? {
         if (id == null) return null
         return getKey("$currentAccount/$RESULT_WATCH_STATE_DATA", id.toString())
+    }
+
+    fun getAllSubscriptions(): List<SubscribedData> {
+        return getKeys("$currentAccount/$RESULT_SUBSCRIBED_STATE_DATA")?.mapNotNull {
+            getKey(it)
+        } ?: emptyList()
+    }
+
+    fun removeSubscribedData(id: Int?) {
+        if (id == null) return
+        AccountManager.localListApi.requireLibraryRefresh = true
+        removeKey("$currentAccount/$RESULT_SUBSCRIBED_STATE_DATA", id.toString())
+    }
+
+    /**
+     * Set new seen episodes and update time
+     **/
+    fun updateSubscribedData(id: Int?, data: SubscribedData?, episodeResponse: EpisodeResponse?) {
+        if (id == null || data == null || episodeResponse == null) return
+        val newData = data.copy(
+            latestUpdatedTime = unixTimeMS,
+            lastSeenEpisodeCount = episodeResponse.getLatestEpisodes()
+        )
+        setKey("$currentAccount/$RESULT_SUBSCRIBED_STATE_DATA", id.toString(), newData)
+    }
+
+    fun setSubscribedData(id: Int?, data: SubscribedData) {
+        if (id == null) return
+        setKey("$currentAccount/$RESULT_SUBSCRIBED_STATE_DATA", id.toString(), data)
+        AccountManager.localListApi.requireLibraryRefresh = true
+    }
+
+    fun getSubscribedData(id: Int?): SubscribedData? {
+        if (id == null) return null
+        return getKey("$currentAccount/$RESULT_SUBSCRIBED_STATE_DATA", id.toString())
     }
 
     fun setViewPos(id: Int?, pos: Long, dur: Long) {
@@ -191,6 +275,22 @@ object DataStoreHelper {
     fun getViewPos(id: Int?): PosDur? {
         if (id == null) return null
         return getKey("$currentAccount/$VIDEO_POS_DUR", id.toString(), null)
+    }
+
+    fun getVideoWatchState(id: Int?): VideoWatchState? {
+        if (id == null) return null
+        return getKey("$currentAccount/$VIDEO_WATCH_STATE", id.toString(), null)
+    }
+
+    fun setVideoWatchState(id: Int?, watchState: VideoWatchState) {
+        if (id == null) return
+
+        // None == No key
+        if (watchState == VideoWatchState.None) {
+            removeKey("$currentAccount/$VIDEO_WATCH_STATE", id.toString())
+        } else {
+            setKey("$currentAccount/$VIDEO_WATCH_STATE", id.toString(), watchState)
+        }
     }
 
     fun getDub(id: Int): DubStatus? {

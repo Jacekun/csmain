@@ -7,6 +7,10 @@ import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.getQualityFromName
 import kotlinx.coroutines.delay
 
+class Dooood : DoodLaExtractor() {
+    override var mainUrl = "https://dooood.com"
+}
+
 class DoodWfExtractor : DoodLaExtractor() {
     override var mainUrl = "https://dood.wf"
 }
@@ -38,6 +42,9 @@ class DoodWsExtractor : DoodLaExtractor() {
     override var mainUrl = "https://dood.ws"
 }
 
+class DoodYtExtractor : DoodLaExtractor() {
+    override var mainUrl = "https://dood.yt"
+}
 
 open class DoodLaExtractor : ExtractorApi() {
     override var name = "DoodStream"
@@ -55,7 +62,7 @@ open class DoodLaExtractor : ExtractorApi() {
         val quality = Regex("\\d{3,4}p").find(response0.substringAfter("<title>").substringBefore("</title>"))?.groupValues?.get(0)
         return listOf(
             ExtractorLink(
-                trueUrl,
+                this.name,
                 this.name,
                 trueUrl,
                 mainUrl,
